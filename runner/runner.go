@@ -8,28 +8,36 @@ import (
 	"strings"
 )
 
-var paramRegex = regexp.MustCompile(`\{\{(\w+)\}\}`)
+var paramRegex = regexp.MustCompile(`\{\{(!)?(\w+)\}\}`)
 
-// ExtractParams returns all {{param}} names from a command string
-func ExtractParams(cmd string) []string {
+// ParamInfo holds param name and whether it's sensitive
+type ParamInfo struct {
+	Name      string
+	Sensitive bool
+}
+
+// ExtractParams returns all {{param}} and {{!param}} from a command string
+func ExtractParams(cmd string) []ParamInfo {
 	matches := paramRegex.FindAllStringSubmatch(cmd, -1)
 	seen := make(map[string]bool)
-	var params []string
+	var params []ParamInfo
 	for _, m := range matches {
-		name := m[1]
+		sensitive := m[1] == "!"
+		name := m[2]
 		if !seen[name] {
 			seen[name] = true
-			params = append(params, name)
+			params = append(params, ParamInfo{Name: name, Sensitive: sensitive})
 		}
 	}
 	return params
 }
 
-// SubstituteParams replaces {{param}} with provided values
+// SubstituteParams replaces {{param}} and {{!param}} with provided values
 func SubstituteParams(cmd string, values map[string]string) string {
 	result := cmd
 	for name, value := range values {
 		result = strings.ReplaceAll(result, "{{"+name+"}}", value)
+		result = strings.ReplaceAll(result, "{{!"+name+"}}", value)
 	}
 	return result
 }

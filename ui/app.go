@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -51,12 +52,11 @@ type App struct {
 	formFocus   int
 	editingCmd  *model.Command
 
-	// Param input
-	paramNames   []string
-	paramValues  map[string]string
-	paramIndex   int
-	paramInput   textinput.Model
-	pendingCmd   *model.Command
+	// Param input (inline mode)
+	paramInfos  []runner.ParamInfo
+	paramValues map[string]string
+	paramInput  textinput.Model
+	pendingCmd  *model.Command
 }
 
 func NewApp(database *db.DB) (*App, error) {
@@ -265,19 +265,21 @@ func (a *App) updateParam(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case "enter":
-		// Save current param value
-		a.paramValues[a.paramNames[a.paramIndex]] = a.paramInput.Value()
-		a.paramIndex++
-
-		if a.paramIndex >= len(a.paramNames) {
-			// All params collected, run the command
-			return a.executeCommand()
+		// Parse inline params: key=value key2=value2
+		parsed := parseInlineParams(a.paramInput.Value())
+		// Validate all params present
+		var missing []string
+		for _, p := range a.paramInfos {
+			if _, ok := parsed[p.Name]; !ok {
+				missing = append(missing, p.Name)
+			}
 		}
-
-		// Next param
-		a.paramInput.SetValue("")
-		a.paramInput.Placeholder = a.paramNames[a.paramIndex]
-		return a, nil
+		if len(missing) > 0 {
+			a.err = "Missing params: " + strings.Join(missing, ", ")
+			return a, nil
+		}
+		a.paramValues = parsed
+		return a.executeCommand()
 
 	default:
 		var cmd tea.Cmd
@@ -286,19 +288,51 @@ func (a *App) updateParam(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// parseInlineParams parses "key=value key2=value2" into map
+func parseInlineParams(input string) map[string]string {
+	result := make(map[string]string)
+	parts := strings.Fields(input)
+	for _, part := range parts {
+		if idx := strings.Index(part, "="); idx > 0 {
+			key := part[:idx]
+			value := part[idx+1:]
+			result[key] = value
+		}
+	}
+	return result
+}
+
 func (a *App) runSelectedCommand() (tea.Model, tea.Cmd) {
 	cmd := a.filtered[a.cursor]
 	params := runner.ExtractParams(cmd.Cmd)
 
 	if len(params) > 0 {
 		a.mode = modeParam
-		a.paramNames = params
+		a.paramInfos = params
 		a.paramValues = make(map[string]string)
-		a.paramIndex = 0
 		a.pendingCmd = &cmd
+
+		// Load last-used values
+		lastParams := make(map[string]string)
+		if cmd.LastParams != "" {
+			json.Unmarshal([]byte(cmd.LastParams), &lastParams)
+		}
+
+		// Build inline input: "key=value key2=value2"
+		var parts []string
+		for _, p := range params {
+			val := ""
+			if !p.Sensitive {
+				val = lastParams[p.Name]
+			}
+			parts = append(parts, p.Name+"="+val)
+		}
+
 		a.paramInput = textinput.New()
-		a.paramInput.Placeholder = params[0]
+		a.paramInput.SetValue(strings.Join(parts, " "))
 		a.paramInput.Focus()
+		// Position cursor at end
+		a.paramInput.CursorEnd()
 		return a, nil
 	}
 
@@ -311,12 +345,27 @@ func (a *App) executeCommand() (tea.Model, tea.Cmd) {
 	finalCmd := runner.SubstituteParams(cmd.Cmd, a.paramValues)
 
 	a.db.UpdateLastUsed(cmd.ID)
+
+	// Save non-sensitive params
+	if len(a.paramInfos) > 0 {
+		toSave := make(map[string]string)
+		for _, p := range a.paramInfos {
+			if !p.Sensitive {
+				if v, ok := a.paramValues[p.Name]; ok {
+					toSave[p.Name] = v
+				}
+			}
+		}
+		a.db.SaveLastParams(cmd.ID, toSave)
+	}
+
 	a.running = true
 	a.outputLines = []string{cmdPreviewStyle.Render("$ " + finalCmd), ""}
 	a.output.SetContent(strings.Join(a.outputLines, "\n"))
 
 	a.mode = modeNormal
 	a.searchInput.Focus()
+	a.refreshCommands() // reload to get updated last_params
 
 	// Start command in goroutine
 	a.outputChan = make(chan runner.OutputMsg)
@@ -485,11 +534,13 @@ func (a *App) View() string {
 		b.WriteString("\n")
 	}
 
-	// Param input
+	// Param input (inline)
 	if a.mode == modeParam {
 		b.WriteString("\n")
-		b.WriteString(labelStyle.Render(fmt.Sprintf("Enter value for {{%s}}: ", a.paramNames[a.paramIndex])))
+		b.WriteString(labelStyle.Render("Params: "))
 		b.WriteString(a.paramInput.View())
+		b.WriteString("\n")
+		b.WriteString(helpStyle.Render("  (edit values inline, enter to run, esc to cancel)"))
 		b.WriteString("\n")
 	}
 

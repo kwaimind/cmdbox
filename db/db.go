@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,14 @@ func (d *DB) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_commands_name ON commands(name);
 		CREATE INDEX IF NOT EXISTS idx_commands_cmd ON commands(cmd);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add last_params column if not exists
+	_, err = d.conn.Exec(`ALTER TABLE commands ADD COLUMN last_params TEXT DEFAULT ''`)
+	// Ignore error if column already exists
+	return nil
 }
 
 func (d *DB) Close() error {
@@ -63,7 +71,7 @@ func (d *DB) Close() error {
 
 func (d *DB) List() ([]model.Command, error) {
 	rows, err := d.conn.Query(`
-		SELECT id, name, cmd, description, created_at, last_used_at
+		SELECT id, name, cmd, description, created_at, last_used_at, COALESCE(last_params, '')
 		FROM commands
 		ORDER BY last_used_at DESC NULLS LAST, created_at DESC
 	`)
@@ -76,7 +84,7 @@ func (d *DB) List() ([]model.Command, error) {
 	for rows.Next() {
 		var c model.Command
 		var lastUsed sql.NullTime
-		if err := rows.Scan(&c.ID, &c.Name, &c.Cmd, &c.Description, &c.CreatedAt, &lastUsed); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Cmd, &c.Description, &c.CreatedAt, &lastUsed, &c.LastParams); err != nil {
 			return nil, err
 		}
 		if lastUsed.Valid {
@@ -128,4 +136,14 @@ func (d *DB) IsDuplicate(cmd string, excludeID int64) (bool, error) {
 		normalized, excludeID,
 	).Scan(&count)
 	return count > 0, err
+}
+
+// SaveLastParams saves param values as JSON (caller should filter sensitive params)
+func (d *DB) SaveLastParams(id int64, params map[string]string) error {
+	data, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	_, err = d.conn.Exec(`UPDATE commands SET last_params = ? WHERE id = ?`, string(data), id)
+	return err
 }

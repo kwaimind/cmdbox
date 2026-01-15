@@ -9,4 +9,5 @@ type Command struct {
 	Description string
 	CreatedAt   time.Time
 	LastUsedAt  *time.Time
+	LastParams  string // JSON map of last-used param values
 }
