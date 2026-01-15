@@ -9,6 +9,7 @@ import (
 	"cmdbox/model"
 	"cmdbox/runner"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -181,6 +182,17 @@ func (a *App) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "C":
 		a.outputLines = []string{}
 		a.output.SetContent("")
+		return a, nil
+
+	case "Y":
+		if len(a.filtered) > 0 {
+			cmd := a.filtered[a.cursor]
+			if err := clipboard.WriteAll(cmd.Cmd); err != nil {
+				a.err = "Failed to copy: " + err.Error()
+			} else {
+				a.status = "Copied!"
+			}
+		}
 		return a, nil
 
 	case "esc":
@@ -650,6 +662,7 @@ func (a *App) renderHelp() string {
 		helpKeyStyle.Render("A") + helpStyle.Render("dd"),
 		helpKeyStyle.Render("E") + helpStyle.Render("dit"),
 		helpKeyStyle.Render("D") + helpStyle.Render("elete"),
+		helpKeyStyle.Render("Y") + helpStyle.Render("ank"),
 		helpKeyStyle.Render("C") + helpStyle.Render("lear"),
 		helpKeyStyle.Render("Q") + helpStyle.Render("uit"),
 	}

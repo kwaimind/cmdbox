@@ -12,6 +12,12 @@ A TUI command palette for saving and running shell commands. Store frequently us
 ## Install
 
 ```bash
+go install .
+```
+
+Or build manually:
+
+```bash
 go build -o cmdbox .
 ./cmdbox
 ```
