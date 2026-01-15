@@ -92,10 +92,10 @@ type outputMsg runner.OutputMsg
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		a.width = msg.Width
-		a.height = msg.Height
-		a.output.Width = msg.Width - 4
-		a.output.Height = msg.Height / 3
+		a.width = msg.Width - 4  // account for app padding
+		a.height = msg.Height - 2 // account for app padding
+		a.output.Width = a.width - 4
+		a.output.Height = a.height / 3
 		return a, nil
 
 	case outputMsg:
@@ -511,7 +511,7 @@ func (a *App) View() string {
 	// Help bar
 	b.WriteString(a.renderHelp())
 
-	return b.String()
+	return appStyle.Render(b.String())
 }
 
 func (a *App) renderList(height int) string {

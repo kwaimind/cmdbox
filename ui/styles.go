@@ -7,7 +7,11 @@ var (
 	primary   = lipgloss.Color("99")  // purple
 	secondary = lipgloss.Color("240") // gray
 	accent    = lipgloss.Color("86")  // green
-	danger = lipgloss.Color("196") // red
+	danger    = lipgloss.Color("196") // red
+
+	// App container
+	appStyle = lipgloss.NewStyle().
+			Padding(1, 2)
 
 	mutedStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("245"))
