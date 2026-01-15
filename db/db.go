@@ -127,12 +127,23 @@ func (d *DB) UpdateLastUsed(id int64) error {
 	return err
 }
 
-// IsDuplicate checks if a command with the same cmd string exists
-func (d *DB) IsDuplicate(cmd string, excludeID int64) (bool, error) {
+// IsDuplicateCmd checks if a command with the same cmd string exists
+func (d *DB) IsDuplicateCmd(cmd string, excludeID int64) (bool, error) {
 	normalized := strings.TrimSpace(cmd)
 	var count int
 	err := d.conn.QueryRow(
 		`SELECT COUNT(*) FROM commands WHERE TRIM(cmd) = ? AND id != ?`,
+		normalized, excludeID,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// IsDuplicateName checks if a command with the same name exists
+func (d *DB) IsDuplicateName(name string, excludeID int64) (bool, error) {
+	normalized := strings.TrimSpace(name)
+	var count int
+	err := d.conn.QueryRow(
+		`SELECT COUNT(*) FROM commands WHERE TRIM(name) = ? AND id != ?`,
 		normalized, excludeID,
 	).Scan(&count)
 	return count > 0, err

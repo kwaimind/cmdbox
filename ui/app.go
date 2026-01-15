@@ -431,12 +431,22 @@ func (a *App) submitForm() (tea.Model, tea.Cmd) {
 		excludeID = a.editingCmd.ID
 	}
 
-	dup, err := a.db.IsDuplicate(cmd, excludeID)
+	dupName, err := a.db.IsDuplicateName(name, excludeID)
 	if err != nil {
 		a.err = err.Error()
 		return a, nil
 	}
-	if dup {
+	if dupName {
+		a.err = "A command with this name already exists"
+		return a, nil
+	}
+
+	dupCmd, err := a.db.IsDuplicateCmd(cmd, excludeID)
+	if err != nil {
+		a.err = err.Error()
+		return a, nil
+	}
+	if dupCmd {
 		a.err = "A command with this exact command already exists"
 		return a, nil
 	}
