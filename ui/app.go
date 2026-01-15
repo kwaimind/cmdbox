@@ -140,7 +140,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (a *App) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c", "Q":
 		return a, tea.Quit
 
 	case "up", "k":
@@ -158,12 +158,12 @@ func (a *App) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.runSelectedCommand()
 		}
 
-	case "a":
+	case "A":
 		a.mode = modeAdd
 		a.initForm(nil)
 		return a, nil
 
-	case "e":
+	case "E":
 		if len(a.filtered) > 0 {
 			a.mode = modeEdit
 			cmd := a.filtered[a.cursor]
@@ -172,10 +172,15 @@ func (a *App) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case "d":
+	case "D":
 		if len(a.filtered) > 0 {
 			a.mode = modeDelete
 		}
+		return a, nil
+
+	case "C":
+		a.outputLines = []string{}
+		a.output.SetContent("")
 		return a, nil
 
 	case "esc":
@@ -456,8 +461,8 @@ func (a *App) View() string {
 	b.WriteString("\n\n")
 
 	// Search bar
-	searchBox := a.searchInput.View()
-	b.WriteString(searchBox)
+	searchLabel := helpKeyStyle.Render("S") + helpStyle.Render("earch") + " "
+	b.WriteString(searchLabel + a.searchInput.View())
 	b.WriteString("\n\n")
 
 	// Command list
@@ -579,17 +584,13 @@ func (a *App) renderHelp() string {
 		return ""
 	}
 
-	keys := []struct{ key, desc string }{
-		{"enter", "run"},
-		{"a", "add"},
-		{"e", "edit"},
-		{"d", "delete"},
-		{"q", "quit"},
-	}
-
-	var parts []string
-	for _, k := range keys {
-		parts = append(parts, helpKeyStyle.Render(k.key)+" "+helpStyle.Render(k.desc))
+	parts := []string{
+		helpKeyStyle.Render("enter") + " " + helpStyle.Render("run"),
+		helpKeyStyle.Render("A") + helpStyle.Render("dd"),
+		helpKeyStyle.Render("E") + helpStyle.Render("dit"),
+		helpKeyStyle.Render("D") + helpStyle.Render("elete"),
+		helpKeyStyle.Render("C") + helpStyle.Render("lear"),
+		helpKeyStyle.Render("Q") + helpStyle.Render("uit"),
 	}
 
 	return strings.Join(parts, "  ")
