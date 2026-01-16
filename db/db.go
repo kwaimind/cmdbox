@@ -60,9 +60,21 @@ func (d *DB) migrate() error {
 	}
 
 	// Add last_params column if not exists
-	_, err = d.conn.Exec(`ALTER TABLE commands ADD COLUMN last_params TEXT DEFAULT ''`)
-	// Ignore error if column already exists
-	return nil
+	d.conn.Exec(`ALTER TABLE commands ADD COLUMN last_params TEXT DEFAULT ''`)
+
+	// SQL queries table
+	_, err = d.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS queries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			sql TEXT NOT NULL,
+			description TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_used_at DATETIME
+		);
+		CREATE INDEX IF NOT EXISTS idx_queries_name ON queries(name);
+	`)
+	return err
 }
 
 func (d *DB) Close() error {
@@ -157,4 +169,84 @@ func (d *DB) SaveLastParams(id int64, params map[string]string) error {
 	}
 	_, err = d.conn.Exec(`UPDATE commands SET last_params = ? WHERE id = ?`, string(data), id)
 	return err
+}
+
+// Query methods
+
+func (d *DB) ListQueries() ([]model.Query, error) {
+	rows, err := d.conn.Query(`
+		SELECT id, name, sql, description, created_at, last_used_at
+		FROM queries
+		ORDER BY last_used_at DESC NULLS LAST, created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var queries []model.Query
+	for rows.Next() {
+		var q model.Query
+		var lastUsed sql.NullTime
+		if err := rows.Scan(&q.ID, &q.Name, &q.SQL, &q.Description, &q.CreatedAt, &lastUsed); err != nil {
+			return nil, err
+		}
+		if lastUsed.Valid {
+			q.LastUsedAt = &lastUsed.Time
+		}
+		queries = append(queries, q)
+	}
+	return queries, rows.Err()
+}
+
+func (d *DB) AddQuery(name, sql, description string) (int64, error) {
+	result, err := d.conn.Exec(
+		`INSERT INTO queries (name, sql, description) VALUES (?, ?, ?)`,
+		name, sql, description,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (d *DB) UpdateQuery(id int64, name, sql, description string) error {
+	_, err := d.conn.Exec(
+		`UPDATE queries SET name = ?, sql = ?, description = ? WHERE id = ?`,
+		name, sql, description, id,
+	)
+	return err
+}
+
+func (d *DB) DeleteQuery(id int64) error {
+	_, err := d.conn.Exec(`DELETE FROM queries WHERE id = ?`, id)
+	return err
+}
+
+func (d *DB) UpdateQueryLastUsed(id int64) error {
+	_, err := d.conn.Exec(
+		`UPDATE queries SET last_used_at = ? WHERE id = ?`,
+		time.Now(), id,
+	)
+	return err
+}
+
+func (d *DB) IsDuplicateQueryName(name string, excludeID int64) (bool, error) {
+	normalized := strings.TrimSpace(name)
+	var count int
+	err := d.conn.QueryRow(
+		`SELECT COUNT(*) FROM queries WHERE TRIM(name) = ? AND id != ?`,
+		normalized, excludeID,
+	).Scan(&count)
+	return count > 0, err
+}
+
+func (d *DB) IsDuplicateQuerySQL(sql string, excludeID int64) (bool, error) {
+	normalized := strings.TrimSpace(sql)
+	var count int
+	err := d.conn.QueryRow(
+		`SELECT COUNT(*) FROM queries WHERE TRIM(sql) = ? AND id != ?`,
+		normalized, excludeID,
+	).Scan(&count)
+	return count > 0, err
 }

@@ -10,6 +10,7 @@ import (
 	"cmdbox/runner"
 
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,13 +27,25 @@ const (
 	modeParam
 )
 
+type tab int
+
+const (
+	tabBash tab = iota
+	tabSQL
+)
+
 type App struct {
 	db       *db.DB
 	commands []model.Command
 	filtered []model.Command
 
+	// SQL queries
+	queries         []model.Query
+	filteredQueries []model.Query
+
 	// UI state
 	mode     mode
+	tab      tab
 	cursor   int
 	width    int
 	height   int
@@ -49,9 +62,11 @@ type App struct {
 	outputChan  chan runner.OutputMsg
 
 	// Form (add/edit)
-	formInputs  []textinput.Model
-	formFocus   int
-	editingCmd  *model.Command
+	formInputs   []textinput.Model
+	sqlTextarea  textarea.Model
+	formFocus    int
+	editingCmd   *model.Command
+	editingQuery *model.Query
 
 	// Param input (inline mode)
 	paramInfos  []runner.ParamInfo
@@ -66,6 +81,11 @@ func NewApp(database *db.DB) (*App, error) {
 		return nil, err
 	}
 
+	queries, err := database.ListQueries()
+	if err != nil {
+		return nil, err
+	}
+
 	search := textinput.New()
 	search.Placeholder = "Search commands..."
 	search.Focus()
@@ -73,12 +93,14 @@ func NewApp(database *db.DB) (*App, error) {
 	output := viewport.New(80, 10)
 
 	app := &App{
-		db:          database,
-		commands:    commands,
-		filtered:    commands,
-		searchInput: search,
-		output:      output,
-		paramValues: make(map[string]string),
+		db:              database,
+		commands:        commands,
+		filtered:        commands,
+		queries:         queries,
+		filteredQueries: queries,
+		searchInput:     search,
+		output:          output,
+		paramValues:     make(map[string]string),
 	}
 
 	return app, nil
@@ -144,37 +166,78 @@ func (a *App) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "Q":
 		return a, tea.Quit
 
+	case "tab":
+		a.cursor = 0
+		a.searchInput.SetValue("")
+		a.outputLines = []string{}
+		a.output.SetContent("")
+		if a.tab == tabBash {
+			a.tab = tabSQL
+			a.searchInput.Placeholder = "Search queries..."
+		} else {
+			a.tab = tabBash
+			a.searchInput.Placeholder = "Search commands..."
+		}
+		a.filterItems()
+		return a, nil
+
 	case "up", "k":
 		if a.cursor > 0 {
 			a.cursor--
 		}
 
 	case "down", "j":
-		if a.cursor < len(a.filtered)-1 {
+		maxIdx := a.listLen() - 1
+		if a.cursor < maxIdx {
 			a.cursor++
 		}
 
 	case "enter":
-		if len(a.filtered) > 0 {
-			return a.runSelectedCommand()
+		if a.tab == tabBash {
+			if len(a.filtered) > 0 {
+				return a.runSelectedCommand()
+			}
+		} else {
+			// SQL tab: show query in output, don't execute
+			if len(a.filteredQueries) > 0 {
+				q := a.filteredQueries[a.cursor]
+				a.outputLines = []string{q.SQL}
+				a.output.SetContent(q.SQL)
+				a.db.UpdateQueryLastUsed(q.ID)
+				a.refreshQueries()
+			}
 		}
+		return a, nil
 
 	case "A":
 		a.mode = modeAdd
-		a.initForm(nil)
+		if a.tab == tabBash {
+			a.initForm(nil)
+		} else {
+			a.initQueryForm(nil)
+		}
 		return a, nil
 
 	case "E":
-		if len(a.filtered) > 0 {
-			a.mode = modeEdit
-			cmd := a.filtered[a.cursor]
-			a.editingCmd = &cmd
-			a.initForm(&cmd)
+		if a.tab == tabBash {
+			if len(a.filtered) > 0 {
+				a.mode = modeEdit
+				cmd := a.filtered[a.cursor]
+				a.editingCmd = &cmd
+				a.initForm(&cmd)
+			}
+		} else {
+			if len(a.filteredQueries) > 0 {
+				a.mode = modeEdit
+				q := a.filteredQueries[a.cursor]
+				a.editingQuery = &q
+				a.initQueryForm(&q)
+			}
 		}
 		return a, nil
 
 	case "D":
-		if len(a.filtered) > 0 {
+		if a.listLen() > 0 {
 			a.mode = modeDelete
 		}
 		return a, nil
@@ -185,31 +248,56 @@ func (a *App) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case "Y":
-		if len(a.filtered) > 0 {
-			cmd := a.filtered[a.cursor]
-			if err := clipboard.WriteAll(cmd.Cmd); err != nil {
-				a.err = "Failed to copy: " + err.Error()
-			} else {
-				a.status = "Copied!"
+		if a.tab == tabBash {
+			if len(a.filtered) > 0 {
+				cmd := a.filtered[a.cursor]
+				if err := clipboard.WriteAll(cmd.Cmd); err != nil {
+					a.err = "Failed to copy: " + err.Error()
+				} else {
+					a.status = "Copied!"
+				}
+			}
+		} else {
+			if len(a.filteredQueries) > 0 {
+				q := a.filteredQueries[a.cursor]
+				if err := clipboard.WriteAll(q.SQL); err != nil {
+					a.err = "Failed to copy: " + err.Error()
+				} else {
+					a.status = "Copied!"
+				}
 			}
 		}
 		return a, nil
 
 	case "esc":
 		a.searchInput.SetValue("")
-		a.filterCommands()
+		a.filterItems()
 
 	default:
 		var cmd tea.Cmd
 		a.searchInput, cmd = a.searchInput.Update(msg)
-		a.filterCommands()
+		a.filterItems()
 		return a, cmd
 	}
 
 	return a, nil
 }
 
+func (a *App) listLen() int {
+	if a.tab == tabBash {
+		return len(a.filtered)
+	}
+	return len(a.filteredQueries)
+}
+
 func (a *App) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// SQL form has 3 logical fields: name(0), sql(1), desc(2)
+	// Bash form has 3 fields: name(0), cmd(1), desc(2)
+	maxFocus := 2
+	if a.tab == tabBash {
+		maxFocus = len(a.formInputs) - 1
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		return a, tea.Quit
@@ -219,23 +307,46 @@ func (a *App) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.searchInput.Focus()
 		return a, nil
 
+	case "S":
+		return a.submitForm()
+
 	case "tab", "down":
-		a.formFocus = (a.formFocus + 1) % len(a.formInputs)
+		// In SQL textarea, tab inserts tab, use ctrl+n or down to move
+		if a.tab == tabSQL && a.formFocus == 1 && msg.String() == "tab" {
+			var cmd tea.Cmd
+			a.sqlTextarea, cmd = a.sqlTextarea.Update(msg)
+			return a, cmd
+		}
+		a.formFocus = (a.formFocus + 1) % (maxFocus + 1)
 		return a, a.focusFormInput()
 
 	case "shift+tab", "up":
 		a.formFocus--
 		if a.formFocus < 0 {
-			a.formFocus = len(a.formInputs) - 1
+			a.formFocus = maxFocus
 		}
 		return a, a.focusFormInput()
 
 	case "enter":
+		if a.tab == tabBash {
+			return a.submitForm()
+		}
+		// SQL tab: enter in textarea adds newline, otherwise submit
+		if a.formFocus == 1 {
+			var cmd tea.Cmd
+			a.sqlTextarea, cmd = a.sqlTextarea.Update(msg)
+			return a, cmd
+		}
 		return a.submitForm()
 
 	default:
 		var cmd tea.Cmd
-		a.formInputs[a.formFocus], cmd = a.formInputs[a.formFocus].Update(msg)
+		if a.tab == tabSQL && a.formFocus == 1 {
+			a.sqlTextarea, cmd = a.sqlTextarea.Update(msg)
+		} else {
+			idx := a.sqlFormInputIndex()
+			a.formInputs[idx], cmd = a.formInputs[idx].Update(msg)
+		}
 		return a, cmd
 	}
 }
@@ -243,15 +354,30 @@ func (a *App) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *App) updateDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
-		if len(a.filtered) > 0 {
-			cmd := a.filtered[a.cursor]
-			if err := a.db.Delete(cmd.ID); err != nil {
-				a.err = err.Error()
-			} else {
-				a.status = "Deleted!"
-				a.refreshCommands()
-				if a.cursor >= len(a.filtered) && a.cursor > 0 {
-					a.cursor--
+		if a.tab == tabBash {
+			if len(a.filtered) > 0 {
+				cmd := a.filtered[a.cursor]
+				if err := a.db.Delete(cmd.ID); err != nil {
+					a.err = err.Error()
+				} else {
+					a.status = "Deleted!"
+					a.refreshCommands()
+					if a.cursor >= len(a.filtered) && a.cursor > 0 {
+						a.cursor--
+					}
+				}
+			}
+		} else {
+			if len(a.filteredQueries) > 0 {
+				q := a.filteredQueries[a.cursor]
+				if err := a.db.DeleteQuery(q.ID); err != nil {
+					a.err = err.Error()
+				} else {
+					a.status = "Deleted!"
+					a.refreshQueries()
+					if a.cursor >= len(a.filteredQueries) && a.cursor > 0 {
+						a.cursor--
+					}
 				}
 			}
 		}
@@ -419,16 +545,72 @@ func (a *App) initForm(cmd *model.Command) {
 	a.formInputs[1] = cmdInput
 	a.formInputs[2] = descInput
 	a.formFocus = 0
+	a.editingQuery = nil
+}
+
+func (a *App) initQueryForm(q *model.Query) {
+	a.formInputs = make([]textinput.Model, 2)
+
+	nameInput := textinput.New()
+	nameInput.Placeholder = "Name (e.g., users by date)"
+	nameInput.Focus()
+
+	descInput := textinput.New()
+	descInput.Placeholder = "Description (optional)"
+
+	// SQL textarea
+	sqlArea := textarea.New()
+	sqlArea.Placeholder = "SELECT * FROM ..."
+	sqlArea.ShowLineNumbers = false
+	sqlArea.SetHeight(8)
+
+	if q != nil {
+		nameInput.SetValue(q.Name)
+		sqlArea.SetValue(q.SQL)
+		descInput.SetValue(q.Description)
+	}
+
+	a.formInputs[0] = nameInput
+	a.formInputs[1] = descInput
+	a.sqlTextarea = sqlArea
+	a.formFocus = 0
+	a.editingCmd = nil
 }
 
 func (a *App) focusFormInput() tea.Cmd {
 	for i := range a.formInputs {
 		a.formInputs[i].Blur()
 	}
-	return a.formInputs[a.formFocus].Focus()
+	a.sqlTextarea.Blur()
+
+	if a.tab == tabSQL && a.formFocus == 1 {
+		// Focus SQL textarea (index 1 in SQL form is textarea)
+		return a.sqlTextarea.Focus()
+	}
+	return a.formInputs[a.sqlFormInputIndex()].Focus()
+}
+
+// sqlFormInputIndex maps formFocus to formInputs index for SQL form
+// SQL form: 0=name, 1=textarea, 2=description
+// formInputs only has [name, description] for SQL
+func (a *App) sqlFormInputIndex() int {
+	if a.tab != tabSQL {
+		return a.formFocus
+	}
+	if a.formFocus == 0 {
+		return 0 // name
+	}
+	return 1 // description (formFocus 2 -> index 1)
 }
 
 func (a *App) submitForm() (tea.Model, tea.Cmd) {
+	if a.tab == tabSQL {
+		return a.submitQueryForm()
+	}
+	return a.submitCommandForm()
+}
+
+func (a *App) submitCommandForm() (tea.Model, tea.Cmd) {
 	name := strings.TrimSpace(a.formInputs[0].Value())
 	cmd := strings.TrimSpace(a.formInputs[1].Value())
 	desc := strings.TrimSpace(a.formInputs[2].Value())
@@ -485,6 +667,63 @@ func (a *App) submitForm() (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+func (a *App) submitQueryForm() (tea.Model, tea.Cmd) {
+	name := strings.TrimSpace(a.formInputs[0].Value())
+	sql := a.sqlTextarea.Value() // preserve formatting from textarea
+	desc := strings.TrimSpace(a.formInputs[1].Value())
+
+	if name == "" || strings.TrimSpace(sql) == "" {
+		a.err = "Name and SQL are required"
+		return a, nil
+	}
+
+	excludeID := int64(0)
+	if a.editingQuery != nil {
+		excludeID = a.editingQuery.ID
+	}
+
+	dupName, err := a.db.IsDuplicateQueryName(name, excludeID)
+	if err != nil {
+		a.err = err.Error()
+		return a, nil
+	}
+	if dupName {
+		a.err = "A query with this name already exists"
+		return a, nil
+	}
+
+	dupSQL, err := a.db.IsDuplicateQuerySQL(sql, excludeID)
+	if err != nil {
+		a.err = err.Error()
+		return a, nil
+	}
+	if dupSQL {
+		a.err = "A query with this exact SQL already exists"
+		return a, nil
+	}
+
+	if a.mode == modeAdd {
+		_, err = a.db.AddQuery(name, sql, desc)
+		if err != nil {
+			a.err = err.Error()
+			return a, nil
+		}
+		a.status = "Added!"
+	} else {
+		err = a.db.UpdateQuery(a.editingQuery.ID, name, sql, desc)
+		if err != nil {
+			a.err = err.Error()
+			return a, nil
+		}
+		a.status = "Updated!"
+	}
+
+	a.refreshQueries()
+	a.mode = modeNormal
+	a.searchInput.Focus()
+	return a, nil
+}
+
 func (a *App) refreshCommands() {
 	commands, err := a.db.List()
 	if err != nil {
@@ -495,6 +734,24 @@ func (a *App) refreshCommands() {
 	a.filterCommands()
 }
 
+func (a *App) refreshQueries() {
+	queries, err := a.db.ListQueries()
+	if err != nil {
+		a.err = err.Error()
+		return
+	}
+	a.queries = queries
+	a.filterQueries()
+}
+
+func (a *App) filterItems() {
+	if a.tab == tabBash {
+		a.filterCommands()
+	} else {
+		a.filterQueries()
+	}
+}
+
 func (a *App) filterCommands() {
 	query := a.searchInput.Value()
 	if query == "" {
@@ -502,7 +759,6 @@ func (a *App) filterCommands() {
 		return
 	}
 
-	// Build searchable strings
 	var targets []string
 	for _, c := range a.commands {
 		targets = append(targets, c.Name+" "+c.Cmd)
@@ -519,6 +775,29 @@ func (a *App) filterCommands() {
 	}
 }
 
+func (a *App) filterQueries() {
+	query := a.searchInput.Value()
+	if query == "" {
+		a.filteredQueries = a.queries
+		return
+	}
+
+	var targets []string
+	for _, q := range a.queries {
+		targets = append(targets, q.Name+" "+q.SQL)
+	}
+
+	matches := fuzzy.Find(query, targets)
+	a.filteredQueries = make([]model.Query, len(matches))
+	for i, m := range matches {
+		a.filteredQueries[i] = a.queries[m.Index]
+	}
+
+	if a.cursor >= len(a.filteredQueries) {
+		a.cursor = max(0, len(a.filteredQueries)-1)
+	}
+}
+
 func (a *App) View() string {
 	if a.width == 0 {
 		return "Loading..."
@@ -526,9 +805,11 @@ func (a *App) View() string {
 
 	var b strings.Builder
 
-	// Title
+	// Title with tabs
 	title := titleStyle.Render("cmdbox")
 	b.WriteString(title)
+	b.WriteString("  ")
+	b.WriteString(a.renderTabs())
 	b.WriteString("\n\n")
 
 	// Search bar
@@ -536,7 +817,7 @@ func (a *App) View() string {
 	b.WriteString(searchLabel + a.searchInput.View())
 	b.WriteString("\n\n")
 
-	// Command list
+	// List
 	listHeight := a.height - a.output.Height - 10
 	if listHeight < 3 {
 		listHeight = 3
@@ -549,10 +830,15 @@ func (a *App) View() string {
 	}
 
 	// Delete confirmation
-	if a.mode == modeDelete && len(a.filtered) > 0 {
-		cmd := a.filtered[a.cursor]
+	if a.mode == modeDelete && a.listLen() > 0 {
+		var name string
+		if a.tab == tabBash {
+			name = a.filtered[a.cursor].Name
+		} else {
+			name = a.filteredQueries[a.cursor].Name
+		}
 		b.WriteString("\n")
-		b.WriteString(warningStyle.Render(fmt.Sprintf("Delete '%s'? (y/n)", cmd.Name)))
+		b.WriteString(warningStyle.Render(fmt.Sprintf("Delete '%s'? (y/n)", name)))
 		b.WriteString("\n")
 	}
 
@@ -593,8 +879,15 @@ func (a *App) View() string {
 }
 
 func (a *App) renderList(height int) string {
+	if a.tab == tabBash {
+		return a.renderCommandList(height)
+	}
+	return a.renderQueryList(height)
+}
+
+func (a *App) renderCommandList(height int) string {
 	if len(a.filtered) == 0 {
-		return mutedStyle.Render("No commands found. Press 'a' to add one.\n")
+		return mutedStyle.Render("No commands found. Press 'A' to add one.\n")
 	}
 
 	var lines []string
@@ -625,7 +918,49 @@ func (a *App) renderList(height int) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+func (a *App) renderQueryList(height int) string {
+	if len(a.filteredQueries) == 0 {
+		return mutedStyle.Render("No queries found. Press 'A' to add one.\n")
+	}
+
+	var lines []string
+	start := 0
+	if a.cursor >= height {
+		start = a.cursor - height + 1
+	}
+
+	end := start + height
+	if end > len(a.filteredQueries) {
+		end = len(a.filteredQueries)
+	}
+
+	for i := start; i < end; i++ {
+		q := a.filteredQueries[i]
+		prefix := "  "
+		style := normalStyle
+		if i == a.cursor {
+			prefix = "▸ "
+			style = selectedStyle
+		}
+
+		name := style.Render(prefix + q.Name)
+		// Show first line of SQL as preview
+		firstLine := strings.Split(q.SQL, "\n")[0]
+		preview := cmdPreviewStyle.Render("  " + truncate(firstLine, a.width-10))
+		lines = append(lines, name, preview)
+	}
+
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func (a *App) renderForm() string {
+	if a.tab == tabBash {
+		return a.renderBashForm()
+	}
+	return a.renderSQLForm()
+}
+
+func (a *App) renderBashForm() string {
 	var b strings.Builder
 
 	title := "Add Command"
@@ -646,10 +981,69 @@ func (a *App) renderForm() string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(helpStyle.Render("tab: next field • enter: save • esc: cancel"))
+	b.WriteString(helpStyle.Render("down: next field • enter: save • esc: cancel"))
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+func (a *App) renderSQLForm() string {
+	var b strings.Builder
+
+	title := "Add Query"
+	if a.mode == modeEdit {
+		title = "Edit Query"
+	}
+	b.WriteString(labelStyle.Render(title))
+	b.WriteString("\n\n")
+
+	// Name field (formFocus 0)
+	b.WriteString(labelStyle.Render("Name: "))
+	style := inputStyle
+	if a.formFocus == 0 {
+		style = focusedInputStyle
+	}
+	b.WriteString(style.Width(a.width - 20).Render(a.formInputs[0].View()))
+	b.WriteString("\n\n")
+
+	// SQL textarea (formFocus 1)
+	b.WriteString(labelStyle.Render("SQL: "))
+	b.WriteString("\n")
+	sqlStyle := inputStyle
+	if a.formFocus == 1 {
+		sqlStyle = focusedInputStyle
+	}
+	b.WriteString(sqlStyle.Width(a.width - 10).Render(a.sqlTextarea.View()))
+	b.WriteString("\n\n")
+
+	// Description field (formFocus 2)
+	b.WriteString(labelStyle.Render("Description: "))
+	style = inputStyle
+	if a.formFocus == 2 {
+		style = focusedInputStyle
+	}
+	b.WriteString(style.Width(a.width - 20).Render(a.formInputs[1].View()))
+	b.WriteString("\n\n")
+
+	b.WriteString(helpStyle.Render("down: next field • S: save • esc: cancel"))
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+func (a *App) renderTabs() string {
+	bashTab := "Bash"
+	sqlTab := "SQL"
+
+	if a.tab == tabBash {
+		bashTab = selectedStyle.Render("[Bash]")
+		sqlTab = mutedStyle.Render(" SQL ")
+	} else {
+		bashTab = mutedStyle.Render(" Bash ")
+		sqlTab = selectedStyle.Render("[SQL]")
+	}
+
+	return bashTab + " " + sqlTab + "  " + helpStyle.Render("(tab to switch)")
 }
 
 func (a *App) renderHelp() string {
@@ -657,14 +1051,27 @@ func (a *App) renderHelp() string {
 		return ""
 	}
 
-	parts := []string{
-		helpKeyStyle.Render("enter") + " " + helpStyle.Render("run"),
-		helpKeyStyle.Render("A") + helpStyle.Render("dd"),
-		helpKeyStyle.Render("E") + helpStyle.Render("dit"),
-		helpKeyStyle.Render("D") + helpStyle.Render("elete"),
-		helpKeyStyle.Render("Y") + helpStyle.Render("ank"),
-		helpKeyStyle.Render("C") + helpStyle.Render("lear"),
-		helpKeyStyle.Render("Q") + helpStyle.Render("uit"),
+	var parts []string
+	if a.tab == tabBash {
+		parts = []string{
+			helpKeyStyle.Render("enter") + " " + helpStyle.Render("run"),
+			helpKeyStyle.Render("A") + helpStyle.Render("dd"),
+			helpKeyStyle.Render("E") + helpStyle.Render("dit"),
+			helpKeyStyle.Render("D") + helpStyle.Render("elete"),
+			helpKeyStyle.Render("Y") + helpStyle.Render("ank"),
+			helpKeyStyle.Render("C") + helpStyle.Render("lear"),
+			helpKeyStyle.Render("Q") + helpStyle.Render("uit"),
+		}
+	} else {
+		parts = []string{
+			helpKeyStyle.Render("enter") + " " + helpStyle.Render("view"),
+			helpKeyStyle.Render("A") + helpStyle.Render("dd"),
+			helpKeyStyle.Render("E") + helpStyle.Render("dit"),
+			helpKeyStyle.Render("D") + helpStyle.Render("elete"),
+			helpKeyStyle.Render("Y") + helpStyle.Render("ank"),
+			helpKeyStyle.Render("C") + helpStyle.Render("lear"),
+			helpKeyStyle.Render("Q") + helpStyle.Render("uit"),
+		}
 	}
 
 	return strings.Join(parts, "  ")
