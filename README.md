@@ -9,6 +9,8 @@
 
 A TUI command palette for saving and running shell commands. Store frequently used commands, search them with fuzzy matching, and execute with parameter support.
 
+![](img/screenshot.png)
+
 ## Install
 
 ```bash
